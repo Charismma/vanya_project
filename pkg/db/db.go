@@ -9,8 +9,10 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
+	//"github.com/golang-jwt/jwt"
 	"github.com/tarantool/go-tarantool/v2"
 	"github.com/tarantool/go-tarantool/v2/crud"
 
@@ -21,19 +23,27 @@ import (
 	_ "github.com/tarantool/go-tarantool/v2/uuid"
 )
 
+// База данных
 type Storage struct {
 	db *tarantool.Connection
 }
+
+// //Пользователь
 type User struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
+
+// //Токен
 type Token struct {
+	Message    string `json:"message,omitempty"`
 	Token      string `json:"token"`
 	Expires_in int    `json:"expires_in"`
 }
+
 type Value struct {
-	Value string `json:"value"`
+	_msgpack struct{} `msgpack:",asArray"` //nolint: structcheck,unused
+	Value    string   `json:"value"`
 }
 type TupleUser struct {
 	_msgpack struct{} `msgpack:",asArray"` //nolint: structcheck,unused
@@ -41,12 +51,14 @@ type TupleUser struct {
 	BucketId *uint64
 	Password string
 }
+
 type Tuple struct {
 	_msgpack struct{} `msgpack:",asArray"` //nolint: structcheck,unused
-	Key      string
-	BucketId *uint64
-	Value    string
+	Key      string   `json:"key"`
+	BucketId *uint64  `json:"-"`
+	Value    string   `json:"value"`
 }
+
 type MyClaims struct {
 	jwt.RegisteredClaims
 	Username string `json:"sub"`
@@ -54,9 +66,11 @@ type MyClaims struct {
 }
 
 var (
-	expires = 72
+	expires = 10000
+	message = "Пользователь успешно зарегистрирован"
 )
 
+// Подключение к БД
 func New() (*Storage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -79,26 +93,53 @@ func New() (*Storage, error) {
 	return &s, nil
 }
 
-func (s *Storage) NewSpace(user User) error {
+// Добавление нового пользователя
+func (s *Storage) NewUser(user User) (Token, error) {
 	hash_pass := sha256.Sum256([]byte(user.Password))
 	hashBase64 := base64.StdEncoding.EncodeToString(hash_pass[:])
 	ret := crud.Result{}
 	err := s.db.Do(
 		crud.MakeInsertRequest("users").Tuple([]interface{}{user.Username, nil, hashBase64}),
 	).GetTyped(&ret)
-	//log.Println(ret.Rows, " ", ret.Metadata)
+	if err != nil {
+		return Token{}, err
+	}
+	result2, err := s.NewToken(user)
+	if err != nil {
+		return Token{}, err
+	}
+	result := Token{
+		Message:    message,
+		Token:      result2.Token,
+		Expires_in: result2.Expires_in,
+	}
+	return result, nil
+}
+
+// Проверка существует ли пользователь
+func (s *Storage) UserExist(user string) error {
+	ret := crud.MakeResult(reflect.TypeOf(TupleUser{}))
+	elem := crud.Condition{
+		Operator: "=",
+		Field:    "login",
+		Value:    user,
+	}
+	uslov := []crud.Condition{}
+	uslov = append(uslov, elem)
+	err := s.db.Do(
+		crud.MakeSelectRequest("users").Conditions(uslov),
+	).GetTyped(&ret)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Do(
-		tarantool.NewEvalRequest(fmt.Sprintf("box.schema.create_space('%s',{format = {{name='key',type='string'},{name='bucket_id',type='unsigned'},{name='value', type='string'}}}) box.space.%s:create_index('key',{parts={'key'}})", user.Username, user.Username)),
-	).Get()
-	if err != nil {
-		return err
+	rows := ret.Rows.([]TupleUser)
+	if len(rows) == 1 && rows[0].Login == user {
+		return errors.New("409")
 	}
 	return nil
 }
-func (s *Storage) NewToken(user User) (string, int, error) {
+
+func (s *Storage) ValidUserPass(user User) (bool, error) {
 	ret := crud.MakeResult(reflect.TypeOf(TupleUser{}))
 	elem := crud.Condition{
 		Operator: "=",
@@ -111,32 +152,39 @@ func (s *Storage) NewToken(user User) (string, int, error) {
 		crud.MakeSelectRequest("users").Conditions(uslov),
 	).GetTyped(&ret)
 	if err != nil {
-		return "", 0, err
+		return false, err
 	}
 	rows := ret.Rows.([]TupleUser)
 	hash_pass := sha256.Sum256([]byte(user.Password))
 	hashBase64 := base64.StdEncoding.EncodeToString(hash_pass[:])
 	if len(rows) == 1 && rows[0].Login == user.Username && rows[0].Password == hashBase64 {
-		//генерируем токен jwt
-		token, exp, err := generateToken(rows[0].Login)
-		if err != nil {
-			return "", 0, err
-		}
-		// log.Println("Генерация токена", token)
-		// log.Println("Генерация токена", exp)
-		return token, exp, err
-	} else {
-		return "", 0, errors.New("login or password incorrect")
+		return true, nil
 	}
+	return false, nil
 }
 
+// Выдача нового токена
+func (s *Storage) NewToken(user User) (Token, error) {
+	//генерируем токен jwt
+	token, exp, err := generateToken(user.Username)
+	if err != nil {
+		return Token{}, err
+	}
+	result := Token{
+		Token:      token,
+		Expires_in: exp,
+	}
+	return result, err
+}
+
+// Генерация токена
 func generateToken(username string) (string, int, error) {
 	jwtSecretKey, exists := os.LookupEnv("JWT_PASS")
 	if !exists {
 		return "", 0, errors.New("Ошибка")
 	}
 	jwtSecretKey2 := []byte(jwtSecretKey)
-	exp := time.Now().Add(time.Hour * time.Duration(expires)).Unix()
+	exp := time.Now().Add(time.Second * time.Duration(expires)).Unix()
 	payload := jwt.MapClaims{
 		"sub": username,
 		"exp": exp,
@@ -150,11 +198,12 @@ func generateToken(username string) (string, int, error) {
 	return t, exp2, nil
 }
 
-func ValidToken(token string) (string, int, bool, error) {
+// Проверка токена
+func ValidToken(token string) (MyClaims, bool, error) {
 	keyFunc := func(t *jwt.Token) (interface{}, error) {
 		// Проверяем, что используется ожидаемый метод подписи
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("Неожиданный метод подписи: %v", t.Header["alg"])
+			return nil, fmt.Errorf("неожиданный метод подписи: %v", t.Header["alg"])
 		}
 		jwtSecretKey, exists := os.LookupEnv("JWT_PASS")
 		if !exists {
@@ -167,19 +216,20 @@ func ValidToken(token string) (string, int, bool, error) {
 	claims := &MyClaims{}
 	parsedToken, err := jwt.ParseWithClaims(token, claims, keyFunc)
 	if err != nil {
-		return "", 0, false, err
+		return MyClaims{}, false, err
 	}
 	if !parsedToken.Valid {
-		return "", 0, false, errors.New("не валиден")
+		return MyClaims{}, false, errors.New("токен не валиден")
 	}
-	log.Println(claims.Expires, claims.Username)
-	return claims.Username, claims.Expires, true, nil
+	return *claims, true, nil
 
 }
-func (s *Storage) AddToken(user string, token string, expires int) error {
+
+// //Добавление кортежа с токеном
+func (s *Storage) AddToken(user string, result Token) error {
 	ret := crud.Result{}
 	err := s.db.Do(
-		crud.MakeInsertRequest("tokens").Tuple([]interface{}{user, nil, token, expires}),
+		crud.MakeUpsertRequest("tokens").Tuple([]interface{}{user, nil, result.Token, result.Expires_in}),
 	).GetTyped(&ret)
 	if err != nil {
 		return err
@@ -187,52 +237,46 @@ func (s *Storage) AddToken(user string, token string, expires int) error {
 	return nil
 }
 
-func (s *Storage) GetValue(user string, key string) (string, string, error) {
+//Получение значения по ключу
+
+func (s *Storage) GetValue(user string, key string) (Tuple, error) {
 	ret := crud.MakeResult(reflect.TypeOf(Tuple{}))
+	key_user := key + "_" + user
 	elem := crud.Condition{
 		Operator: "=",
 		Field:    "key",
-		Value:    key,
+		Value:    key_user,
 	}
 	uslov := []crud.Condition{}
 	uslov = append(uslov, elem)
 	err := s.db.Do(
-		crud.MakeSelectRequest(user).Conditions(uslov),
+		crud.MakeSelectRequest("data").Conditions(uslov),
 	).GetTyped(&ret)
 	if err != nil {
-		return "", "", err
+		return Tuple{}, err
 	}
 	rows := ret.Rows.([]Tuple)
+	suffix := "_" + user
+	key_norm, exist := strings.CutSuffix(rows[0].Key, suffix)
+	rows[0].Key = key_norm
+	if !exist {
+		return Tuple{}, err
+	}
 	if len(rows) == 1 {
-		return rows[0].Key, rows[0].Value, nil
+		return rows[0], nil
 	} else {
-		return "", "", errors.New("no value")
+		return Tuple{}, errors.New("no value")
 	}
 }
-func (s *Storage) AddTuple(user string, key string, value string) (string, string, error) {
+
+// Добавление нового кортежа с ключом и значением
+func (s *Storage) AddTuple(user string, key string, value string) error {
 	ret := crud.MakeResult(reflect.TypeOf(Tuple{}))
+	key_user := key + "_" + user
 	err := s.db.Do(
-		crud.MakeUpsertRequest(user).Tuple([]interface{}{key, nil, value})).GetTyped(&ret)
+		crud.MakeUpsertRequest("data").Tuple([]interface{}{key_user, nil, value})).GetTyped(&ret)
 	if err != nil {
-		return "", "", err
+		return err
 	}
-	rows := ret.Rows.([]Tuple)
-	if len(rows) == 1 {
-		return rows[0].Key, rows[0].Value, nil
-	} else {
-		return "", "", errors.New("no value")
-	}
+	return nil
 }
-
-// spaceName := "new_space"
-
-// log.Println(ret.Rows)
-// err := api.db.Do(
-// 	crud.MakeGetRequest("users").Key([]interface{}{"l"}),
-// ).GetTyped(&ret)
-// _, err = api.db.Do(
-// 	tarantool.NewEvalRequest(fmt.Sprintf("box.schema.space.create('%s')", spaceName)),
-// ).Get()
-// data, err := api.db.Do(
-// 	tarantool.NewSelectRequest("users").Index("login").Limit(1).Iterator(tarantool.IterEq).Key([]interface{}{"l"}),
-// ).Get()

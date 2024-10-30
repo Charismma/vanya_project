@@ -7,6 +7,7 @@ import (
 	"net/http"
 )
 
+// Структура сервера
 type server struct {
 	db  *db.Storage
 	api *api.API
