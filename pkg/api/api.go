@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/gorilla/mux"
 	_ "github.com/tarantool/go-tarantool/v2/datetime"
@@ -154,7 +153,7 @@ func (api *API) upsertHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, errors.New("пустое значение ключа").Error(), http.StatusBadRequest)
 			return
 		}
-		if unsafe.Sizeof(value.Value) > 5120 {
+		if len(value.Value) > 5120 {
 			http.Error(w, errors.New("value превышает 5 КБ").Error(), http.StatusBadRequest)
 			return
 		}
@@ -245,7 +244,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			http.Error(w, errors.New("пустое значение ключа").Error(), http.StatusBadRequest)
 			return
 		}
-		if unsafe.Sizeof(key) > 1024 {
+		if len(key) > 1024 {
 			http.Error(w, errors.New("key превышает 1 КБ").Error(), http.StatusBadRequest)
 			return
 		}
