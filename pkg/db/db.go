@@ -256,13 +256,13 @@ func (s *Storage) GetValue(user string, key string) (Tuple, error) {
 		return Tuple{}, err
 	}
 	rows := ret.Rows.([]Tuple)
-	suffix := "_" + user
-	key_norm, exist := strings.CutSuffix(rows[0].Key, suffix)
-	rows[0].Key = key_norm
-	if !exist {
-		return Tuple{}, err
-	}
 	if len(rows) == 1 {
+		suffix := "_" + user
+		key_norm, exist := strings.CutSuffix(rows[0].Key, suffix)
+		if !exist {
+			return Tuple{}, err
+		}
+		rows[0].Key = key_norm
 		return rows[0], nil
 	} else {
 		return Tuple{}, errors.New("no value")
@@ -279,4 +279,21 @@ func (s *Storage) AddTuple(user string, key string, value string) error {
 		return err
 	}
 	return nil
+}
+
+// Удаление кортежа по ключу
+func (s *Storage) DeleteTuple(user string, key string) error {
+	ret := crud.MakeResult(reflect.TypeOf(Tuple{}))
+	key_user := key + "_" + user
+	err := s.db.Do(
+		crud.MakeDeleteRequest("data").Key(key_user)).GetTyped(&ret)
+	if err != nil {
+		return err
+	}
+	rows := ret.Rows.([]Tuple)
+	if len(rows) == 1 {
+		return nil
+	} else {
+		return errors.New("no value")
+	}
 }

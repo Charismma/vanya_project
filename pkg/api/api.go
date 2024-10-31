@@ -46,7 +46,7 @@ func (api *API) endpoints() {
 	api.router.HandleFunc("/token", api.tokenHandler).Methods(http.MethodPost, http.MethodOptions)
 	api.router.Handle("/kv/{key}", authMiddleware(http.HandlerFunc(api.upsertHandler))).Methods(http.MethodPut, http.MethodOptions)
 	api.router.Handle("/kv/{key}", authMiddleware(http.HandlerFunc(api.getHandler))).Methods(http.MethodGet, http.MethodOptions)
-	// api.router.Handle("/kv/{key}", authMiddleware(http.HandlerFunc(api.deleteHandler))).Methods(http.MethodDelete, http.MethodOptions)
+	api.router.Handle("/kv/{key}", authMiddleware(http.HandlerFunc(api.deleteHandler))).Methods(http.MethodDelete, http.MethodOptions)
 
 }
 
@@ -193,12 +193,25 @@ func (api *API) getHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(tuple)
 }
 
-// //Удаление кортежа по ключу
-// func (api *API) deleteHandler(w http.ResponseWriter, r *http.Request) {
-// 	key := mux.Vars(r)["key"]
-// 	user := r.Context().Value("user").(string)
-// 	log.Println("Удаление значения по ключу", key, user)
-// }
+// Удаление кортежа по ключу
+func (api *API) deleteHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.Context().Value(IdentityKey_Key).(string)
+	if key == "" {
+		http.Error(w, errors.New("пустое значение ключа").Error(), http.StatusBadRequest)
+		return
+	}
+	user := r.Context().Value(IdentityKey).(string)
+	err := api.db.DeleteTuple(user, key)
+	if err != nil {
+		if err.Error() == "no value" {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
 
 // Middleware для авторизации пользователя
 func authMiddleware(next http.Handler) http.Handler {
@@ -230,6 +243,10 @@ func authMiddleware(next http.Handler) http.Handler {
 		key := mux.Vars(r)["key"]
 		if key == "" {
 			http.Error(w, errors.New("пустое значение ключа").Error(), http.StatusBadRequest)
+			return
+		}
+		if unsafe.Sizeof(key) > 1024 {
+			http.Error(w, errors.New("key превышает 1 КБ").Error(), http.StatusBadRequest)
 			return
 		}
 		ctx := context.WithValue(context.Background(), IdentityKey, claims.Username)
