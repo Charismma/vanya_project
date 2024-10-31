@@ -148,6 +148,10 @@ func (api *API) upsertHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer r.Body.Close()
+		if value.Value == "" {
+			http.Error(w, errors.New("отсутвует значение").Error(), http.StatusBadRequest)
+			return
+		}
 		key := r.Context().Value(IdentityKey_Key).(string)
 		if key == "" {
 			http.Error(w, errors.New("пустое значение ключа").Error(), http.StatusBadRequest)
